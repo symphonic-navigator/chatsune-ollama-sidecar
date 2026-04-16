@@ -418,3 +418,40 @@ async def test_assistant_tool_call_history_passthrough():
     assert args == "{\"loc\":\"Vienna\"}"
     tool_msg = next(m for m in sent if m["role"] == "tool")
     assert tool_msg["tool_call_id"] == "c1"
+
+
+@respx.mock
+async def test_image_content_part_becomes_data_uri_image_url():
+    captured: list[dict] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(
+            200, content=_sse([_chunk(content="ok"), _chunk(finish_reason="stop")])
+        )
+
+    respx.post("http://localhost:8000/v1/chat/completions").mock(side_effect=_capture)
+    engine = VllmEngine("http://localhost:8000", metadata={})
+    body = GenerateChatBody(
+        model_slug="m",
+        messages=[Message(
+            role="user",
+            content=[
+                ContentPartText(type="text", text="What is this?"),
+                ContentPartImage(type="image", media_type="image/png", data_b64="QUJDRA=="),
+            ],
+        )],
+    )
+    try:
+        async for _ in engine.generate_chat(body):
+            pass
+    finally:
+        await engine.aclose()
+
+    sent = captured[0]["messages"]
+    user_parts = sent[0]["content"]
+    assert isinstance(user_parts, list)
+    assert user_parts[0] == {"type": "text", "text": "What is this?"}
+    image = user_parts[1]
+    assert image["type"] == "image_url"
+    assert image["image_url"]["url"] == "data:image/png;base64,QUJDRA=="
