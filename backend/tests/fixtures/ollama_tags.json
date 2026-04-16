@@ -1,0 +1,34 @@
+{
+  "models": [
+    {
+      "name": "llama3.2:8b",
+      "size": 4920000000,
+      "digest": "abc123",
+      "details": {
+        "family": "llama",
+        "parameter_size": "8B",
+        "quantization_level": "Q4_K_M"
+      }
+    },
+    {
+      "name": "llava:7b",
+      "size": 4100000000,
+      "digest": "def456",
+      "details": {
+        "family": "llava",
+        "parameter_size": "7B",
+        "quantization_level": "Q4_0"
+      }
+    },
+    {
+      "name": "mystery:1b",
+      "size": 500000000,
+      "digest": "ghi789",
+      "details": {
+        "family": "mystery",
+        "parameter_size": "1B",
+        "quantization_level": "Q8_0"
+      }
+    }
+  ]
+}
