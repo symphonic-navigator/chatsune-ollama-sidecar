@@ -236,9 +236,11 @@ Expected: prints a version number (e.g. `6.0.2`).
 - [ ] **Step 4: Commit**
 
 ```bash
-git add backend/pyproject.toml backend/uv.lock
+git add backend/pyproject.toml
 git commit -m "Add pyyaml for YAML-based vLLM model metadata config"
 ```
+
+Note: `uv.lock` is in this project's `.gitignore` (intentional); do not add it.
 
 ---
 
