@@ -30,11 +30,27 @@ def test_rejects_host_key_without_prefix(monkeypatch):
         Settings()
 
 
-def test_rejects_non_wss_backend(monkeypatch):
+def test_rejects_non_websocket_scheme(monkeypatch):
     monkeypatch.setenv("CHATSUNE_BACKEND_URL", "http://chat.example.com")
     monkeypatch.setenv("CHATSUNE_HOST_KEY", "cshost_abc123")
     with pytest.raises(ValidationError):
         Settings()
+
+
+def test_accepts_ws_scheme_for_local_dev(monkeypatch):
+    monkeypatch.setenv("CHATSUNE_BACKEND_URL", "ws://backend:8000")
+    monkeypatch.setenv("CHATSUNE_HOST_KEY", "cshost_abc123")
+    s = Settings()
+    assert s.chatsune_backend_url == "ws://backend:8000"
+    assert s.backend_is_insecure() is True
+    assert s.ws_endpoint() == "ws://backend:8000/ws/sidecar"
+
+
+def test_wss_is_not_insecure(monkeypatch):
+    monkeypatch.setenv("CHATSUNE_BACKEND_URL", "wss://chat.example.com")
+    monkeypatch.setenv("CHATSUNE_HOST_KEY", "cshost_abc123")
+    s = Settings()
+    assert s.backend_is_insecure() is False
 
 
 def test_ws_endpoint_appends_path(monkeypatch):

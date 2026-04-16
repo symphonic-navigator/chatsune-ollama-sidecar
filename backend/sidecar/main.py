@@ -46,6 +46,14 @@ async def _run(settings: Settings) -> int:
         health_port=settings.sidecar_health_port,
         host_key_tail=settings.host_key_tail(),
     )
+    if settings.backend_is_insecure():
+        log.warning(
+            "sidecar.insecure_backend_scheme",
+            message=(
+                "CHATSUNE_BACKEND_URL uses ws:// (no TLS) — acceptable for "
+                "local development only. Production MUST use wss:// per SPEC §3."
+            ),
+        )
 
     engine: Engine = OllamaEngine(settings.ollama_url)
     health = HealthState()

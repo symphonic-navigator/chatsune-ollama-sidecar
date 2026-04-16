@@ -32,10 +32,19 @@ class Settings(BaseSettings):
 
     @field_validator("chatsune_backend_url")
     @classmethod
-    def _must_be_wss(cls, v: str) -> str:
-        if not v.startswith("wss://"):
-            raise ValueError("CHATSUNE_BACKEND_URL must use the wss:// scheme")
+    def _must_be_ws_scheme(cls, v: str) -> str:
+        # SPEC §3 mandates wss:// for production. We also accept ws:// so
+        # local development against an untERMinated backend is possible;
+        # main.py logs a warning in that case.
+        if not (v.startswith("wss://") or v.startswith("ws://")):
+            raise ValueError(
+                "CHATSUNE_BACKEND_URL must use the wss:// scheme "
+                "(ws:// is permitted for local development)"
+            )
         return v
+
+    def backend_is_insecure(self) -> bool:
+        return self.chatsune_backend_url.startswith("ws://")
 
     @field_validator("chatsune_host_key")
     @classmethod
