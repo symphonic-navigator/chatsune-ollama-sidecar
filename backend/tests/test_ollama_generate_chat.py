@@ -185,6 +185,97 @@ async def test_tool_call_fragments_passed_through():
 
 
 @respx.mock
+async def test_tool_call_dict_arguments_are_json_serialised():
+    """Ollama emits arguments as dict; wire format is a JSON string (SPEC §8.2)."""
+    chunks = [
+        {
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": {"loc": "Vienna", "units": "c"},
+                        }
+                    }
+                ],
+            },
+            "done": False,
+        },
+        {"message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop"},
+    ]
+    respx.post("http://localhost:11434/api/chat").mock(
+        return_value=httpx.Response(200, content=_ndjson(chunks))
+    )
+    engine = OllamaEngine("http://localhost:11434")
+    body = GenerateChatBody(
+        model_slug="m",
+        messages=[Message(role="user", content="weather?")],
+        tools=[{"type": "function", "function": {"name": "get_weather"}}],
+    )
+    deltas: list[StreamDelta] = []
+    try:
+        async for item in engine.generate_chat(body):
+            if isinstance(item, StreamDelta):
+                deltas.append(item)
+    finally:
+        await engine.aclose()
+    frags = [f for d in deltas for f in (d.tool_calls or [])]
+    assert frags[0].function.name == "get_weather"
+    parsed = json.loads(frags[0].function.arguments)
+    assert parsed == {"loc": "Vienna", "units": "c"}
+
+
+@respx.mock
+async def test_assistant_tool_call_history_is_sent_as_dict_to_ollama():
+    """Incoming assistant message with JSON-string arguments must go out as dict."""
+    captured: list[dict] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            content=_ndjson([
+                {"message": {"role": "assistant", "content": "ok"}, "done": False},
+                {"message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop"},
+            ]),
+        )
+
+    respx.post("http://localhost:11434/api/chat").mock(side_effect=_capture)
+    engine = OllamaEngine("http://localhost:11434")
+    body = GenerateChatBody(
+        model_slug="m",
+        messages=[
+            Message(role="user", content="weather?"),
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=[{
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{\"loc\":\"Vienna\"}"},
+                }],
+            ),
+            Message(role="tool", content="sunny", tool_call_id="c1"),
+        ],
+    )
+    try:
+        async for _ in engine.generate_chat(body):
+            pass
+    finally:
+        await engine.aclose()
+
+    assert captured
+    sent_messages = captured[0]["messages"]
+    assistant = next(m for m in sent_messages if m["role"] == "assistant")
+    args = assistant["tool_calls"][0]["function"]["arguments"]
+    # Must be a dict for Ollama, not a JSON string.
+    assert isinstance(args, dict)
+    assert args == {"loc": "Vienna"}
+
+
+@respx.mock
 async def test_finish_reason_length_and_tool_calls():
     chunks = [
         {"message": {"role": "assistant", "content": "abc"}, "done": False},

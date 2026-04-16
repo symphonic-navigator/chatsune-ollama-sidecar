@@ -36,3 +36,21 @@ def test_warn_alias_maps_to_warning(capsys):
     log.warning("via_warn")
     out = capsys.readouterr().out.strip().splitlines()
     assert json.loads(out[0])["level"] == "warning"
+
+
+def test_exception_traceback_rendered_in_output(capsys):
+    """log.exception() must surface a full traceback in the `exception` key."""
+    configure_logging("debug")
+    log = get_logger("test")
+    try:
+        raise RuntimeError("boom")
+    except RuntimeError:
+        log.exception("unexpected_failure", id="abc")
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 1
+    record = json.loads(out[0])
+    assert record["event"] == "unexpected_failure"
+    assert record["id"] == "abc"
+    assert "exception" in record
+    assert "RuntimeError: boom" in record["exception"]
+    assert "Traceback" in record["exception"]

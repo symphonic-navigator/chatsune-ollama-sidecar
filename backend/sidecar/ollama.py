@@ -306,7 +306,9 @@ def _message_to_ollama(m: Any) -> dict[str, Any]:
                 "type": tc.type,
                 "function": {
                     "name": tc.function.name,
-                    "arguments": tc.function.arguments,
+                    # Ollama expects arguments as a dict in message history;
+                    # CSP carries them as a JSON string. Parse back if needed.
+                    "arguments": _args_to_dict(tc.function.arguments),
                 },
             }
             for tc in m.tool_calls
@@ -314,6 +316,15 @@ def _message_to_ollama(m: Any) -> dict[str, Any]:
     if m.tool_call_id is not None:
         out["tool_call_id"] = m.tool_call_id
     return out
+
+
+def _args_to_dict(args: Any) -> Any:
+    if isinstance(args, str):
+        try:
+            return json.loads(args)
+        except json.JSONDecodeError:
+            return args  # leave as string; Ollama may cope or error clearly
+    return args if args is not None else {}
 
 
 _OLLAMA_FINISH_MAP = {
@@ -347,6 +358,13 @@ def _tool_call_fragments(raw: Any) -> list[ToolCallFragment]:
         if not isinstance(tc, dict):
             continue
         fn = (tc.get("function") or {})
+        # Ollama emits arguments as a dict; SPEC §8.2 requires a JSON string
+        # on the wire so fragments can be concatenated by consumers.
+        args = fn.get("arguments")
+        if isinstance(args, (dict, list)):
+            args = json.dumps(args, separators=(",", ":"))
+        elif args is not None and not isinstance(args, str):
+            args = str(args)
         out.append(
             ToolCallFragment(
                 index=i,
@@ -354,7 +372,7 @@ def _tool_call_fragments(raw: Any) -> list[ToolCallFragment]:
                 type=tc.get("type"),
                 function=ToolCallFragmentFunction(
                     name=fn.get("name"),
-                    arguments=fn.get("arguments"),
+                    arguments=args,
                 ),
             )
         )

@@ -38,6 +38,10 @@ def configure_logging(level: str = "info") -> None:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True, key="ts"),
+            # Render exc_info from log.exception() into an `exception` key
+            # with the full traceback text — without this the JSON renderer
+            # drops the traceback and only emits exc_info=True.
+            structlog.processors.format_exc_info,
             structlog.processors.EventRenamer("event"),
             structlog.processors.JSONRenderer(),
         ],
