@@ -180,6 +180,13 @@ class OllamaEngine:
                     for frag in _tool_call_fragments(message.get("tool_calls")):
                         yield StreamDelta(tool_calls=[frag])
 
+                    # Modern Ollama (think: true) emits thinking on a
+                    # dedicated field; older builds inline it as
+                    # <think>...</think> in content (handled by the parser).
+                    thinking = message.get("thinking") or ""
+                    if thinking and reasoning_on:
+                        yield StreamDelta(reasoning=thinking)
+
                     content = message.get("content") or ""
                     if content:
                         for delta in parser.feed(content):
@@ -209,6 +216,12 @@ class OllamaEngine:
             "messages": messages,
             "stream": True,
         }
+        # Ollama's top-level `think` flag enables the dedicated thinking
+        # channel on capable models. Only set it when truly requested so
+        # older Ollama versions (which don't recognise the parameter)
+        # don't see a no-op key.
+        if body.options.reasoning:
+            payload["think"] = True
         if options:
             payload["options"] = options
         if body.tools is not None:

@@ -243,6 +243,126 @@ async def test_connect_failure_raises_engine_unavailable():
 
 
 @respx.mock
+async def test_reasoning_flag_sets_ollama_think_param():
+    """options.reasoning=True must surface as `think: true` to Ollama."""
+    captured: list[dict] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            content=_ndjson([
+                {"message": {"role": "assistant", "content": "ok"}, "done": False},
+                {"message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop"},
+            ]),
+        )
+
+    respx.post("http://localhost:11434/api/chat").mock(side_effect=_capture)
+    engine = OllamaEngine("http://localhost:11434")
+    body = GenerateChatBody(
+        model_slug="deepseek-r1:7b",
+        messages=[Message(role="user", content="hi")],
+        options={"reasoning": True},
+    )
+    try:
+        async for _ in engine.generate_chat(body):
+            pass
+    finally:
+        await engine.aclose()
+    assert captured and captured[0].get("think") is True
+
+
+@respx.mock
+async def test_no_think_param_when_reasoning_off():
+    """options.reasoning=False must omit `think` (don't poke older Ollama)."""
+    captured: list[dict] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            content=_ndjson([
+                {"message": {"role": "assistant", "content": "ok"}, "done": False},
+                {"message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop"},
+            ]),
+        )
+
+    respx.post("http://localhost:11434/api/chat").mock(side_effect=_capture)
+    engine = OllamaEngine("http://localhost:11434")
+    body = GenerateChatBody(
+        model_slug="m",
+        messages=[Message(role="user", content="hi")],
+    )
+    try:
+        async for _ in engine.generate_chat(body):
+            pass
+    finally:
+        await engine.aclose()
+    assert captured and "think" not in captured[0]
+
+
+@respx.mock
+async def test_message_thinking_field_routes_to_reasoning_channel():
+    """Modern Ollama emits thinking on `message.thinking`, not in <think> tags."""
+    chunks = [
+        {"message": {"role": "assistant", "content": "", "thinking": "let me ponder"}, "done": False},
+        {"message": {"role": "assistant", "content": "", "thinking": " more"}, "done": False},
+        {"message": {"role": "assistant", "content": "The answer is 42."}, "done": False},
+        {"message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop"},
+    ]
+    respx.post("http://localhost:11434/api/chat").mock(
+        return_value=httpx.Response(200, content=_ndjson(chunks))
+    )
+    engine = OllamaEngine("http://localhost:11434")
+    body = GenerateChatBody(
+        model_slug="deepseek-r1:7b",
+        messages=[Message(role="user", content="q")],
+        options={"reasoning": True},
+    )
+    deltas: list[StreamDelta] = []
+    try:
+        async for item in engine.generate_chat(body):
+            if isinstance(item, StreamDelta):
+                deltas.append(item)
+    finally:
+        await engine.aclose()
+    reasoning = "".join(d.reasoning or "" for d in deltas)
+    content = "".join(d.content or "" for d in deltas)
+    assert reasoning == "let me ponder more"
+    assert content == "The answer is 42."
+    for d in deltas:
+        populated = sum(x is not None for x in (d.content, d.reasoning, d.tool_calls))
+        assert populated <= 1
+
+
+@respx.mock
+async def test_message_thinking_dropped_when_reasoning_off():
+    """`message.thinking` arriving while reasoning is off MUST be dropped."""
+    chunks = [
+        {"message": {"role": "assistant", "content": "", "thinking": "secret"}, "done": False},
+        {"message": {"role": "assistant", "content": "visible"}, "done": False},
+        {"message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop"},
+    ]
+    respx.post("http://localhost:11434/api/chat").mock(
+        return_value=httpx.Response(200, content=_ndjson(chunks))
+    )
+    engine = OllamaEngine("http://localhost:11434")
+    body = GenerateChatBody(
+        model_slug="m",
+        messages=[Message(role="user", content="q")],
+    )
+    deltas: list[StreamDelta] = []
+    try:
+        async for item in engine.generate_chat(body):
+            if isinstance(item, StreamDelta):
+                deltas.append(item)
+    finally:
+        await engine.aclose()
+    assert "".join(d.reasoning or "" for d in deltas) == ""
+    assert "".join(d.content or "" for d in deltas) == "visible"
+
+
+@respx.mock
 async def test_cancellation_stops_iteration():
     chunks = [
         {"message": {"role": "assistant", "content": f"tok{i}"}, "done": False}
