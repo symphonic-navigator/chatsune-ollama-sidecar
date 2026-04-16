@@ -21,6 +21,8 @@ from .engine import (
     EngineBadResponse,
     EngineStreamItem,
     EngineUnavailable,
+    ModelNotFound,
+    ModelOutOfMemory,
     StreamTerminal,
 )
 from .frames import (
@@ -155,8 +157,12 @@ class VllmEngine:
                 json=payload,
                 timeout=httpx.Timeout(None, connect=3.0),
             ) as resp:
+                if resp.status_code == 404:
+                    raise ModelNotFound(body.model_slug)
                 if resp.status_code >= 400:
                     text = (await resp.aread()).decode("utf-8", errors="replace")
+                    if _is_oom(text):
+                        raise ModelOutOfMemory(text)
                     raise EngineBadResponse(f"vllm {resp.status_code}: {text}")
 
                 splitter = ThinkTagSplitter(reasoning_on=reasoning_on)
@@ -344,3 +350,8 @@ def _tool_call_fragments(raw: Any) -> list[ToolCallFragment]:
             )
         )
     return out
+
+
+def _is_oom(text: str) -> bool:
+    needle = text.lower()
+    return "out of memory" in needle or "oom" in needle or ("cuda" in needle and "memory" in needle)

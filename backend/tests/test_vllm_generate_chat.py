@@ -455,3 +455,106 @@ async def test_image_content_part_becomes_data_uri_image_url():
     image = user_parts[1]
     assert image["type"] == "image_url"
     assert image["image_url"]["url"] == "data:image/png;base64,QUJDRA=="
+
+
+from sidecar.engine import (
+    EngineBadResponse,
+    EngineUnavailable,
+    ModelNotFound,
+    ModelOutOfMemory,
+)
+
+
+@respx.mock
+async def test_http_404_raises_model_not_found():
+    respx.post("http://localhost:8000/v1/chat/completions").mock(
+        return_value=httpx.Response(404, json={"error": "model 'xxx' does not exist"})
+    )
+    engine = VllmEngine("http://localhost:8000", metadata={})
+    body = GenerateChatBody(
+        model_slug="xxx", messages=[Message(role="user", content="x")]
+    )
+    try:
+        with pytest.raises(ModelNotFound):
+            async for _ in engine.generate_chat(body):
+                pass
+    finally:
+        await engine.aclose()
+
+
+@respx.mock
+async def test_http_400_oom_raises_model_oom():
+    respx.post("http://localhost:8000/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            400, json={"error": "CUDA out of memory, tried to allocate 2GiB"}
+        )
+    )
+    engine = VllmEngine("http://localhost:8000", metadata={})
+    body = GenerateChatBody(
+        model_slug="m", messages=[Message(role="user", content="x")]
+    )
+    try:
+        with pytest.raises(ModelOutOfMemory):
+            async for _ in engine.generate_chat(body):
+                pass
+    finally:
+        await engine.aclose()
+
+
+@respx.mock
+async def test_http_400_generic_raises_engine_bad_response():
+    respx.post("http://localhost:8000/v1/chat/completions").mock(
+        return_value=httpx.Response(400, json={"error": "invalid request"})
+    )
+    engine = VllmEngine("http://localhost:8000", metadata={})
+    body = GenerateChatBody(
+        model_slug="m", messages=[Message(role="user", content="x")]
+    )
+    try:
+        with pytest.raises(EngineBadResponse):
+            async for _ in engine.generate_chat(body):
+                pass
+    finally:
+        await engine.aclose()
+
+
+@respx.mock
+async def test_connect_error_raises_engine_unavailable():
+    respx.post("http://localhost:8000/v1/chat/completions").mock(
+        side_effect=httpx.ConnectError("refused")
+    )
+    engine = VllmEngine("http://localhost:8000", metadata={})
+    body = GenerateChatBody(
+        model_slug="m", messages=[Message(role="user", content="x")]
+    )
+    try:
+        with pytest.raises(EngineUnavailable):
+            async for _ in engine.generate_chat(body):
+                pass
+    finally:
+        await engine.aclose()
+
+
+@respx.mock
+async def test_cancellation_stops_iteration_cleanly():
+    events = [_chunk(content=f"t{i}") for i in range(500)]
+    events.append(_chunk(finish_reason="stop"))
+    respx.post("http://localhost:8000/v1/chat/completions").mock(
+        return_value=httpx.Response(200, content=_sse(events))
+    )
+    engine = VllmEngine("http://localhost:8000", metadata={})
+    body = GenerateChatBody(
+        model_slug="m", messages=[Message(role="user", content="x")]
+    )
+    seen = 0
+    gen = engine.generate_chat(body)
+    try:
+        async for item in gen:
+            if isinstance(item, StreamDelta):
+                seen += 1
+                if seen >= 3:
+                    break
+    finally:
+        await gen.aclose()
+        await engine.aclose()
+    assert seen == 3
