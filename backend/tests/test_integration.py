@@ -1,16 +1,18 @@
-"""End-to-end: fake Chatsune backend + respx-mocked Ollama + real sidecar.
+"""End-to-end: fake Chatsune backend + mocked engine HTTP + real sidecar.
 
 Drives:
   connect → handshake → list_models → generate_chat → cancel → ack → shutdown
 
-This test is the acceptance gate for SPEC §18.5.
+Parametrised across both Ollama and vLLM adapters to prove the dispatcher
+and connection plumbing are engine-agnostic.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from dataclasses import dataclass
+from typing import AsyncIterator, Callable
 
 import httpx
 import pytest
@@ -20,9 +22,10 @@ import websockets
 from sidecar.config import Settings
 from sidecar.connection import ConnectionManager
 from sidecar.dispatcher import Dispatcher
-from sidecar.frames import parse_frame
+from sidecar.engine import Engine
 from sidecar.main import build_handshake_payload
 from sidecar.ollama import OllamaEngine
+from sidecar.vllm import VllmEngine
 
 
 @asynccontextmanager
@@ -32,35 +35,11 @@ async def fake_backend(handler):
         yield f"ws://127.0.0.1:{port}/ws/sidecar"
 
 
-def _tags():
-    return {
-        "models": [{
-            "name": "llama3.2:8b",
-            "size": 1,
-            "digest": "d",
-            "details": {
-                "family": "llama",
-                "parameter_size": "8B",
-                "quantization_level": "Q4_K_M",
-            },
-        }]
-    }
-
-
-def _show():
-    return {
-        "capabilities": [],
-        "model_info": {"llama.context_length": 131072},
-    }
-
-
 def _ndjson(lines):
     return ("\n".join(json.dumps(x) for x in lines) + "\n").encode()
 
 
 async def _async_ndjson_stream(lines) -> AsyncIterator[bytes]:
-    """Yield each NDJSON line individually, with an event-loop yield between
-    each one so that cancellation can land mid-stream."""
     for line in lines:
         yield (json.dumps(line) + "\n").encode()
         await asyncio.sleep(0)
@@ -78,32 +57,142 @@ class _NdjsonStream(httpx.AsyncByteStream):
         pass
 
 
-def _streaming_chat_response(lines) -> httpx.Response:
-    return httpx.Response(200, stream=_NdjsonStream(lines))
+async def _async_sse_stream(events) -> AsyncIterator[bytes]:
+    for e in events:
+        yield f"data: {json.dumps(e)}\n\n".encode()
+        await asyncio.sleep(0)
+    yield b"data: [DONE]\n\n"
 
 
+class _SseStream(httpx.AsyncByteStream):
+    def __init__(self, events):
+        self._events = events
+
+    async def __aiter__(self):
+        async for chunk in _async_sse_stream(self._events):
+            yield chunk
+
+    async def aclose(self) -> None:
+        pass
+
+
+@dataclass
+class _EngineSetup:
+    name: str
+    build_engine: Callable[[], Engine]
+    mock_http: Callable[[], None]
+    expected_slug: str
+    settings_engine: str
+
+
+def _setup_ollama() -> _EngineSetup:
+    def mock_http():
+        respx.get("http://localhost:11434/api/version").mock(
+            return_value=httpx.Response(200, json={"version": "0.5.7"})
+        )
+        respx.get("http://localhost:11434/api/tags").mock(
+            return_value=httpx.Response(200, json={
+                "models": [{
+                    "name": "llama3.2:8b",
+                    "size": 1,
+                    "digest": "d",
+                    "details": {
+                        "family": "llama",
+                        "parameter_size": "8B",
+                        "quantization_level": "Q4_K_M",
+                    },
+                }]
+            })
+        )
+        respx.post("http://localhost:11434/api/show").mock(
+            return_value=httpx.Response(200, json={
+                "capabilities": [],
+                "model_info": {"llama.context_length": 131072},
+            })
+        )
+        ollama_chunks = [
+            {"message": {"role": "assistant", "content": f"t{i}"}, "done": False}
+            for i in range(1000)
+        ] + [{"message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop"}]
+        respx.post("http://localhost:11434/api/chat").mock(
+            return_value=httpx.Response(200, stream=_NdjsonStream(ollama_chunks))
+        )
+
+    return _EngineSetup(
+        name="ollama",
+        build_engine=lambda: OllamaEngine("http://localhost:11434"),
+        mock_http=mock_http,
+        expected_slug="llama3.2:8b",
+        settings_engine="ollama",
+    )
+
+
+def _setup_vllm() -> _EngineSetup:
+    def mock_http():
+        respx.get("http://localhost:8000/version").mock(
+            return_value=httpx.Response(200, json={"version": "0.7.3"})
+        )
+        respx.get("http://localhost:8000/v1/models").mock(
+            return_value=httpx.Response(200, json={
+                "object": "list",
+                "data": [{
+                    "id": "integration-model",
+                    "object": "model",
+                    "owned_by": "vllm",
+                    "max_model_len": 8192,
+                    "root": "fake/repo",
+                }],
+            })
+        )
+        vllm_events = [
+            {
+                "id": "cmpl-1",
+                "object": "chat.completion.chunk",
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": f"t{i}"},
+                    "finish_reason": None,
+                }],
+            }
+            for i in range(1000)
+        ] + [
+            {
+                "id": "cmpl-1",
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            }
+        ]
+        respx.post("http://localhost:8000/v1/chat/completions").mock(
+            return_value=httpx.Response(200, stream=_SseStream(vllm_events))
+        )
+
+    from sidecar.vllm_models_config import VllmModelMetadata
+
+    return _EngineSetup(
+        name="vllm",
+        build_engine=lambda: VllmEngine(
+            "http://localhost:8000",
+            metadata={
+                "integration-model": VllmModelMetadata(
+                    display_name="Integration Model",
+                    capabilities=["text"],
+                ),
+            },
+        ),
+        mock_http=mock_http,
+        expected_slug="integration-model",
+        settings_engine="vllm",
+    )
+
+
+ENGINE_SETUPS = [_setup_ollama(), _setup_vllm()]
+
+
+@pytest.mark.parametrize("setup", ENGINE_SETUPS, ids=[s.name for s in ENGINE_SETUPS])
 @respx.mock
-async def test_full_cycle():
-    # --- Ollama mocks ------------------------------------------------------
-    respx.get("http://localhost:11434/api/version").mock(
-        return_value=httpx.Response(200, json={"version": "0.5.7"})
-    )
-    respx.get("http://localhost:11434/api/tags").mock(
-        return_value=httpx.Response(200, json=_tags())
-    )
-    respx.post("http://localhost:11434/api/show").mock(
-        return_value=httpx.Response(200, json=_show())
-    )
-    # 1000-chunk stream so cancel beats natural end.
-    chunks = [
-        {"message": {"role": "assistant", "content": f"t{i}"}, "done": False}
-        for i in range(1000)
-    ] + [{"message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop"}]
-    respx.post("http://localhost:11434/api/chat").mock(
-        return_value=_streaming_chat_response(chunks)
-    )
+async def test_full_cycle(setup: _EngineSetup):
+    setup.mock_http()
 
-    # --- Fake Chatsune backend --------------------------------------------
     observed: list[dict] = []
     list_models_done = asyncio.Event()
     streamed = asyncio.Event()
@@ -112,6 +201,7 @@ async def test_full_cycle():
     async def handler(ws):
         hello = json.loads(await ws.recv())
         assert hello["type"] == "handshake"
+        assert hello["engine"]["type"] == setup.name
         await ws.send(json.dumps({
             "type": "handshake_ack",
             "csp_version": "1.0",
@@ -121,7 +211,6 @@ async def test_full_cycle():
             "notices": [],
         }))
 
-        # list_models
         await ws.send(json.dumps({"type": "req", "id": "r1", "op": "list_models"}))
         while not list_models_done.is_set():
             msg = json.loads(await ws.recv())
@@ -131,11 +220,10 @@ async def test_full_cycle():
             elif msg["type"] == "ping":
                 await ws.send(json.dumps({"type": "pong"}))
 
-        # generate_chat + cancel
         await ws.send(json.dumps({
             "type": "req", "id": "r2", "op": "generate_chat",
             "body": {
-                "model_slug": "llama3.2:8b",
+                "model_slug": setup.expected_slug,
                 "messages": [{"role": "user", "content": "hi"}],
             },
         }))
@@ -163,12 +251,16 @@ async def test_full_cycle():
             chatsune_backend_url=url.replace("/ws/sidecar", ""),
             chatsune_host_key="cshost_integration_001",
             ollama_url="http://localhost:11434",
+            vllm_url="http://localhost:8000",
+            vllm_models_config_path=None,
+            vllm_models_overlay_path=None,
+            sidecar_engine=setup.settings_engine,
             sidecar_health_port=0,
             sidecar_log_level="warn",
             sidecar_max_concurrent_requests=1,
         )
 
-        engine = OllamaEngine(settings.ollama_url)
+        engine = setup.build_engine()
         try:
             version = await engine.probe_version()
             handshake = build_handshake_payload(
@@ -204,10 +296,9 @@ async def test_full_cycle():
         finally:
             await engine.aclose()
 
-    # Assertions
     res = next(f for f in observed if f["type"] == "res")
     assert res["id"] == "r1"
-    assert res["body"]["models"][0]["slug"] == "llama3.2:8b"
+    assert res["body"]["models"][0]["slug"] == setup.expected_slug
     stream_end = next(
         f for f in observed if f["type"] == "stream_end" and f["id"] == "r2"
     )

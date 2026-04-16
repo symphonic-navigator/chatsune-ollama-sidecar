@@ -11,6 +11,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 LogLevel = Literal["debug", "info", "warn", "error"]
+SidecarEngine = Literal["ollama", "vllm"]
 
 
 class Settings(BaseSettings):
@@ -25,6 +26,11 @@ class Settings(BaseSettings):
     chatsune_host_key: str = Field(...)
 
     ollama_url: str = Field(default="http://host.docker.internal:11434")
+
+    sidecar_engine: SidecarEngine = Field(default="ollama")
+    vllm_url: str = Field(default="http://host.docker.internal:8000")
+    vllm_models_config_path: str | None = Field(default=None)
+    vllm_models_overlay_path: str | None = Field(default=None)
 
     sidecar_health_port: int = Field(default=8080, ge=1, le=65535)
     sidecar_log_level: LogLevel = Field(default="info")

@@ -13,6 +13,8 @@ from .engine import Engine
 from .healthcheck import HealthState, HealthcheckServer
 from .logging_setup import configure_logging, get_logger
 from .ollama import OllamaEngine
+from .vllm import VllmEngine
+from .vllm_models_config import load_vllm_models_config
 
 
 SIDECAR_VERSION = "1.0.0"
@@ -22,6 +24,9 @@ CSP_VERSION = "1.0"
 def build_handshake_payload(
     settings: Settings, *, engine_type: str, engine_version: str
 ) -> dict[str, Any]:
+    endpoint_hint = (
+        settings.ollama_url if engine_type == "ollama" else settings.vllm_url
+    )
     return {
         "type": "handshake",
         "csp_version": CSP_VERSION,
@@ -29,11 +34,23 @@ def build_handshake_payload(
         "engine": {
             "type": engine_type,
             "version": engine_version,
-            "endpoint_hint": settings.ollama_url,
+            "endpoint_hint": endpoint_hint,
         },
         "max_concurrent_requests": settings.sidecar_max_concurrent_requests,
         "capabilities": ["chat_streaming", "tool_calls", "vision", "reasoning"],
     }
+
+
+def _build_engine(settings: Settings) -> Engine:
+    if settings.sidecar_engine == "ollama":
+        return OllamaEngine(settings.ollama_url)
+    if settings.sidecar_engine == "vllm":
+        metadata = load_vllm_models_config(
+            settings.vllm_models_config_path,
+            settings.vllm_models_overlay_path,
+        )
+        return VllmEngine(settings.vllm_url, metadata=metadata)
+    raise ValueError(f"unknown engine: {settings.sidecar_engine}")
 
 
 async def _run(settings: Settings) -> int:
@@ -42,7 +59,9 @@ async def _run(settings: Settings) -> int:
     log.info(
         "sidecar.starting",
         backend_url=settings.chatsune_backend_url,
+        engine=settings.sidecar_engine,
         ollama_url=settings.ollama_url,
+        vllm_url=settings.vllm_url,
         health_port=settings.sidecar_health_port,
         host_key_tail=settings.host_key_tail(),
     )
@@ -55,7 +74,7 @@ async def _run(settings: Settings) -> int:
             ),
         )
 
-    engine: Engine = OllamaEngine(settings.ollama_url)
+    engine: Engine = _build_engine(settings)
     health = HealthState()
     health_server = HealthcheckServer(health, port=settings.sidecar_health_port)
     await health_server.start()

@@ -1,0 +1,24 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "gemma-4-26b",
+      "object": "model",
+      "created": 1776354390,
+      "owned_by": "vllm",
+      "root": "lcu0312/gemma-4-26B-A4B-it-AWQ-4bit",
+      "parent": null,
+      "max_model_len": 262144,
+      "permission": []
+    },
+    {
+      "id": "no-context-model",
+      "object": "model",
+      "created": 1776354000,
+      "owned_by": "vllm",
+      "root": "some/repo",
+      "parent": null,
+      "permission": []
+    }
+  ]
+}
