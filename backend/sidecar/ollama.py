@@ -113,7 +113,14 @@ class OllamaEngine:
             caps.append("tool_calling")
         if _has_vision(model_info) or "vision" in engine_caps:
             caps.append("vision")
-        if family in _REASONING_FAMILIES or "reasoning" in engine_caps:
+        # Ollama exposes reasoning as "thinking" in /api/show capabilities on
+        # recent versions; older builds used "reasoning". The family allowlist
+        # covers both older Ollama and engines that omit the flag entirely.
+        if (
+            family in _REASONING_FAMILIES
+            or "thinking" in engine_caps
+            or "reasoning" in engine_caps
+        ):
             caps.append("reasoning")
 
         return ModelDescriptor(

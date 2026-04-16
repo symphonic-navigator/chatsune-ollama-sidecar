@@ -105,5 +105,46 @@ async def test_probe_version_returns_unknown_on_failure():
         await engine.aclose()
 
 
+@respx.mock
+async def test_thinking_capability_maps_to_reasoning():
+    """Recent Ollama versions expose reasoning models as `thinking` in /api/show.
+
+    The model's `family` is unknown to our allowlist (e.g. `gpt-oss`); the
+    capability flag is the only signal.
+    """
+    tags = {
+        "models": [{
+            "name": "gpt-oss:20b",
+            "size": 1,
+            "digest": "x",
+            "details": {
+                "family": "gpt-oss",
+                "parameter_size": "20B",
+                "quantization_level": "Q4_K_M",
+            },
+        }]
+    }
+    show = {
+        "capabilities": ["completion", "thinking"],
+        "model_info": {"gptoss.context_length": 8192},
+    }
+    respx.get("http://localhost:11434/api/tags").mock(
+        return_value=httpx.Response(200, json=tags)
+    )
+    respx.post(
+        "http://localhost:11434/api/show",
+        json__eq={"model": "gpt-oss:20b"},
+    ).mock(return_value=httpx.Response(200, json=show))
+
+    engine = OllamaEngine("http://localhost:11434")
+    try:
+        models = await engine.list_models()
+    finally:
+        await engine.aclose()
+
+    assert len(models) == 1
+    assert "reasoning" in models[0].capabilities
+
+
 # Import the exception at module load so the earlier test resolves it.
 from sidecar.engine import EngineUnavailable  # noqa: E402
