@@ -1,0 +1,21 @@
+services:
+  chatsune-sidecar:
+    image: ghcr.io/symphonic-navigator/chatsune-ollama-sidecar-backend:latest
+    restart: unless-stopped
+    environment:
+      CHATSUNE_BACKEND_URL: ${CHATSUNE_BACKEND_URL:?required}
+      CHATSUNE_HOST_KEY: ${CHATSUNE_HOST_KEY:?required}
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      SIDECAR_HEALTH_PORT: "8080"
+      SIDECAR_LOG_LEVEL: ${SIDECAR_LOG_LEVEL:-info}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Read-only root FS; /tmp mounted as tmpfs for any ephemeral writes
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
