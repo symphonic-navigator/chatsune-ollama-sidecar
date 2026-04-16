@@ -73,3 +73,59 @@ def test_log_level_case_insensitive(monkeypatch):
     monkeypatch.setenv("SIDECAR_LOG_LEVEL", "DEBUG")
     s = Settings()
     assert s.sidecar_log_level == "debug"
+
+
+def test_sidecar_engine_defaults_to_ollama(monkeypatch):
+    monkeypatch.setenv("CHATSUNE_BACKEND_URL", "wss://chat.example.com")
+    monkeypatch.setenv("CHATSUNE_HOST_KEY", "cshost_abc123")
+    s = Settings()
+    assert s.sidecar_engine == "ollama"
+
+
+def test_sidecar_engine_accepts_vllm(monkeypatch):
+    monkeypatch.setenv("CHATSUNE_BACKEND_URL", "wss://chat.example.com")
+    monkeypatch.setenv("CHATSUNE_HOST_KEY", "cshost_abc123")
+    monkeypatch.setenv("SIDECAR_ENGINE", "vllm")
+    s = Settings()
+    assert s.sidecar_engine == "vllm"
+
+
+def test_sidecar_engine_rejects_unknown_value(monkeypatch):
+    monkeypatch.setenv("CHATSUNE_BACKEND_URL", "wss://chat.example.com")
+    monkeypatch.setenv("CHATSUNE_HOST_KEY", "cshost_abc123")
+    monkeypatch.setenv("SIDECAR_ENGINE", "lmstudio")
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_vllm_url_default(monkeypatch):
+    monkeypatch.setenv("CHATSUNE_BACKEND_URL", "wss://chat.example.com")
+    monkeypatch.setenv("CHATSUNE_HOST_KEY", "cshost_abc123")
+    s = Settings()
+    assert s.vllm_url == "http://host.docker.internal:8000"
+
+
+def test_vllm_url_override(monkeypatch):
+    monkeypatch.setenv("CHATSUNE_BACKEND_URL", "wss://chat.example.com")
+    monkeypatch.setenv("CHATSUNE_HOST_KEY", "cshost_abc123")
+    monkeypatch.setenv("VLLM_URL", "http://localhost:8001")
+    s = Settings()
+    assert s.vllm_url == "http://localhost:8001"
+
+
+def test_vllm_config_paths_default_none(monkeypatch):
+    monkeypatch.setenv("CHATSUNE_BACKEND_URL", "wss://chat.example.com")
+    monkeypatch.setenv("CHATSUNE_HOST_KEY", "cshost_abc123")
+    s = Settings()
+    assert s.vllm_models_config_path is None
+    assert s.vllm_models_overlay_path is None
+
+
+def test_vllm_config_paths_from_env(monkeypatch):
+    monkeypatch.setenv("CHATSUNE_BACKEND_URL", "wss://chat.example.com")
+    monkeypatch.setenv("CHATSUNE_HOST_KEY", "cshost_abc123")
+    monkeypatch.setenv("VLLM_MODELS_CONFIG_PATH", "/etc/models.yaml")
+    monkeypatch.setenv("VLLM_MODELS_OVERLAY_PATH", "/etc/models.local.yaml")
+    s = Settings()
+    assert s.vllm_models_config_path == "/etc/models.yaml"
+    assert s.vllm_models_overlay_path == "/etc/models.local.yaml"
