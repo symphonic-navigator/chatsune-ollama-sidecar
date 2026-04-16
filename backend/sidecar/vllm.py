@@ -28,6 +28,8 @@ from .frames import (
     ModelCapability,
     ModelDescriptor,
     StreamDelta,
+    ToolCallFragment,
+    ToolCallFragmentFunction,
     Usage,
 )
 from .logging_setup import get_logger
@@ -203,6 +205,11 @@ class VllmEngine:
                         ):
                             yield StreamDelta(reasoning=reasoning_content)
 
+                        raw_tcs = delta.get("tool_calls")
+                        frags = _tool_call_fragments(raw_tcs)
+                        if frags:
+                            yield StreamDelta(tool_calls=frags)
+
                         finish_reason = choice.get("finish_reason")
                         if finish_reason is not None:
                             terminal = StreamTerminal(
@@ -307,4 +314,33 @@ def _message_to_openai(m: Any) -> dict[str, Any]:
         ]
     if m.tool_call_id is not None:
         out["tool_call_id"] = m.tool_call_id
+    return out
+
+
+def _tool_call_fragments(raw: Any) -> list[ToolCallFragment]:
+    if not isinstance(raw, list):
+        return []
+    out: list[ToolCallFragment] = []
+    for tc in raw:
+        if not isinstance(tc, dict):
+            continue
+        index = tc.get("index")
+        if not isinstance(index, int):
+            continue
+        fn = tc.get("function") or {}
+        args = fn.get("arguments")
+        if args is not None and not isinstance(args, str):
+            # OpenAI-native payloads always use a string; be defensive.
+            args = json.dumps(args, separators=(",", ":"))
+        out.append(
+            ToolCallFragment(
+                index=index,
+                id=tc.get("id"),
+                type=tc.get("type"),
+                function=ToolCallFragmentFunction(
+                    name=fn.get("name"),
+                    arguments=args,
+                ),
+            )
+        )
     return out

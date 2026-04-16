@@ -293,3 +293,128 @@ async def test_inline_think_tags_dropped_when_reasoning_off():
         await engine.aclose()
     assert "".join(d.reasoning or "" for d in deltas) == ""
     assert "".join(d.content or "" for d in deltas) == "visible"
+
+
+@respx.mock
+async def test_tool_call_fragments_progressive():
+    events = [
+        _chunk(tool_calls=[{
+            "index": 0,
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "get_weather", "arguments": "{\"loc"},
+        }]),
+        _chunk(tool_calls=[{
+            "index": 0,
+            "function": {"arguments": "\":\"Vienna"},
+        }]),
+        _chunk(tool_calls=[{
+            "index": 0,
+            "function": {"arguments": "\"}"},
+        }]),
+        _chunk(finish_reason="tool_calls"),
+    ]
+    respx.post("http://localhost:8000/v1/chat/completions").mock(
+        return_value=httpx.Response(200, content=_sse(events))
+    )
+    engine = VllmEngine("http://localhost:8000", metadata={})
+    body = GenerateChatBody(
+        model_slug="m",
+        messages=[Message(role="user", content="weather?")],
+        tools=[{"type": "function", "function": {"name": "get_weather"}}],
+    )
+    deltas: list[StreamDelta] = []
+    try:
+        async for item in engine.generate_chat(body):
+            if isinstance(item, StreamDelta):
+                deltas.append(item)
+    finally:
+        await engine.aclose()
+    frags = [f for d in deltas for f in (d.tool_calls or [])]
+    assert len(frags) == 3
+    assert frags[0].index == 0
+    assert frags[0].id == "call_1"
+    assert frags[0].function.name == "get_weather"
+    assert frags[0].function.arguments == "{\"loc"
+    assert frags[1].function.arguments == "\":\"Vienna"
+    assert frags[2].function.arguments == "\"}"
+    # Reconstructed arguments must parse:
+    joined = "".join(f.function.arguments or "" for f in frags)
+    assert json.loads(joined) == {"loc": "Vienna"}
+
+
+@respx.mock
+async def test_tools_field_forwarded_to_vllm():
+    captured: list[dict] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(
+            200, content=_sse([_chunk(content="ok"), _chunk(finish_reason="stop")])
+        )
+
+    respx.post("http://localhost:8000/v1/chat/completions").mock(side_effect=_capture)
+    engine = VllmEngine("http://localhost:8000", metadata={})
+    body = GenerateChatBody(
+        model_slug="m",
+        messages=[Message(role="user", content="hi")],
+        tools=[{
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Fetch the weather",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }],
+    )
+    try:
+        async for _ in engine.generate_chat(body):
+            pass
+    finally:
+        await engine.aclose()
+    assert captured[0]["tools"][0]["function"]["name"] == "get_weather"
+
+
+@respx.mock
+async def test_assistant_tool_call_history_passthrough():
+    """Assistant history with JSON-string arguments must reach vLLM unchanged."""
+    captured: list[dict] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(
+            200, content=_sse([_chunk(content="ok"), _chunk(finish_reason="stop")])
+        )
+
+    respx.post("http://localhost:8000/v1/chat/completions").mock(side_effect=_capture)
+    engine = VllmEngine("http://localhost:8000", metadata={})
+    body = GenerateChatBody(
+        model_slug="m",
+        messages=[
+            Message(role="user", content="weather?"),
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=[{
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{\"loc\":\"Vienna\"}"},
+                }],
+            ),
+            Message(role="tool", content="sunny", tool_call_id="c1"),
+        ],
+    )
+    try:
+        async for _ in engine.generate_chat(body):
+            pass
+    finally:
+        await engine.aclose()
+
+    sent = captured[0]["messages"]
+    assistant = next(m for m in sent if m["role"] == "assistant")
+    args = assistant["tool_calls"][0]["function"]["arguments"]
+    # Stays a JSON string — unlike Ollama, vLLM expects OpenAI-native shape.
+    assert isinstance(args, str)
+    assert args == "{\"loc\":\"Vienna\"}"
+    tool_msg = next(m for m in sent if m["role"] == "tool")
+    assert tool_msg["tool_call_id"] == "c1"
