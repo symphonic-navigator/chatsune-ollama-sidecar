@@ -253,8 +253,22 @@ class VllmEngine:
         if p.stop is not None:
             payload["stop"] = p.stop
         if body.tools is not None:
-            payload["tools"] = [t.model_dump(exclude_none=True) for t in body.tools]
+            if self._model_is_tool_capable(body.model_slug):
+                payload["tools"] = [t.model_dump(exclude_none=True) for t in body.tools]
+            else:
+                # SPEC §8.1: a backend should not send tools to a non-tool-capable
+                # model. When it does anyway (or when no metadata declares the
+                # capability), pin tool_choice to "none" so vLLM does not default
+                # to "auto" and demand a tool-call parser the server was not
+                # started with.
+                payload["tool_choice"] = "none"
         return payload
+
+    def _model_is_tool_capable(self, slug: str) -> bool:
+        meta = self._metadata.get(slug)
+        if meta is None or meta.capabilities is None:
+            return False
+        return "tool_calling" in meta.capabilities
 
 
 _FINISH_REASON_MAP = {

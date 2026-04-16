@@ -344,7 +344,9 @@ async def test_tool_call_fragments_progressive():
 
 
 @respx.mock
-async def test_tools_field_forwarded_to_vllm():
+async def test_tools_forwarded_when_model_is_tool_capable():
+    from sidecar.vllm_models_config import VllmModelMetadata
+
     captured: list[dict] = []
 
     def _capture(request: httpx.Request) -> httpx.Response:
@@ -354,7 +356,10 @@ async def test_tools_field_forwarded_to_vllm():
         )
 
     respx.post("http://localhost:8000/v1/chat/completions").mock(side_effect=_capture)
-    engine = VllmEngine("http://localhost:8000", metadata={})
+    engine = VllmEngine(
+        "http://localhost:8000",
+        metadata={"m": VllmModelMetadata(capabilities=["text", "tool_calling"])},
+    )
     body = GenerateChatBody(
         model_slug="m",
         messages=[Message(role="user", content="hi")],
@@ -373,6 +378,66 @@ async def test_tools_field_forwarded_to_vllm():
     finally:
         await engine.aclose()
     assert captured[0]["tools"][0]["function"]["name"] == "get_weather"
+    # Native tool-choice — let vLLM decide. Sidecar MUST NOT pin.
+    assert "tool_choice" not in captured[0]
+
+
+@respx.mock
+async def test_tools_dropped_and_tool_choice_none_when_model_not_tool_capable():
+    """SPEC §8.1 defence: if tools arrive for a text-only model (metadata
+    missing or capabilities omit `tool_calling`), the sidecar must NOT forward
+    the tools block and MUST pin tool_choice to 'none' so vLLM does not demand
+    --enable-auto-tool-choice.
+    """
+    captured: list[dict] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(
+            200, content=_sse([_chunk(content="ok"), _chunk(finish_reason="stop")])
+        )
+
+    respx.post("http://localhost:8000/v1/chat/completions").mock(side_effect=_capture)
+    engine = VllmEngine("http://localhost:8000", metadata={})
+    body = GenerateChatBody(
+        model_slug="m",
+        messages=[Message(role="user", content="hi")],
+        tools=[{"type": "function", "function": {"name": "get_weather"}}],
+    )
+    try:
+        async for _ in engine.generate_chat(body):
+            pass
+    finally:
+        await engine.aclose()
+    sent = captured[0]
+    assert "tools" not in sent
+    assert sent["tool_choice"] == "none"
+
+
+@respx.mock
+async def test_no_tool_choice_when_body_has_no_tools():
+    """Don't set tool_choice when the backend didn't ask for tools."""
+    captured: list[dict] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(
+            200, content=_sse([_chunk(content="ok"), _chunk(finish_reason="stop")])
+        )
+
+    respx.post("http://localhost:8000/v1/chat/completions").mock(side_effect=_capture)
+    engine = VllmEngine("http://localhost:8000", metadata={})
+    body = GenerateChatBody(
+        model_slug="m", messages=[Message(role="user", content="hi")]
+    )
+    try:
+        async for _ in engine.generate_chat(body):
+            pass
+    finally:
+        await engine.aclose()
+    sent = captured[0]
+    assert "tools" not in sent
+    assert "tool_choice" not in sent
 
 
 @respx.mock
