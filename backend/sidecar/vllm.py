@@ -354,4 +354,4 @@ def _tool_call_fragments(raw: Any) -> list[ToolCallFragment]:
 
 def _is_oom(text: str) -> bool:
     needle = text.lower()
-    return "out of memory" in needle or "oom" in needle or ("cuda" in needle and "memory" in needle)
+    return "out of memory" in needle or ("cuda" in needle and "memory" in needle)

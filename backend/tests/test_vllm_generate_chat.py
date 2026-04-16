@@ -558,3 +558,21 @@ async def test_cancellation_stops_iteration_cleanly():
         await gen.aclose()
         await engine.aclose()
     assert seen == 3
+
+
+@respx.mock
+async def test_http_400_mentioning_random_oom_like_words_not_classified_as_oom():
+    """Tighten: a 400 body mentioning 'bedroom' or 'zoom' must NOT become ModelOutOfMemory."""
+    respx.post("http://localhost:8000/v1/chat/completions").mock(
+        return_value=httpx.Response(400, json={"error": "the prompt mentions a bedroom"})
+    )
+    engine = VllmEngine("http://localhost:8000", metadata={})
+    body = GenerateChatBody(
+        model_slug="m", messages=[Message(role="user", content="x")]
+    )
+    try:
+        with pytest.raises(EngineBadResponse):
+            async for _ in engine.generate_chat(body):
+                pass
+    finally:
+        await engine.aclose()
