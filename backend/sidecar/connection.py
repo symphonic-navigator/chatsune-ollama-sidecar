@@ -74,10 +74,17 @@ class ConnectionManager:
 
         self._ping_interval = 30.0
         self._pong_timeout = 10.0
+        # SPEC §11: two consecutive missed pongs = silence > 60 s → close.
+        self._heartbeat_deadline = 60.0
 
         self._send_q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._stop = asyncio.Event()
         self._active_ws: ClientConnection | None = None
+        # Per-session flag: True once this session's handshake_ack was
+        # accepted. Consulted by run_forever() to decide whether the
+        # backoff counter should reset (SPEC §12: "a successful handshake
+        # resets the backoff counter").
+        self._handshake_completed = False
 
     # ----- public API ------------------------------------------------------
 
@@ -103,7 +110,7 @@ class ConnectionManager:
                     raise HardStop(exit_code=2)
                 return
 
-            if reason == StopReason.PEER_CLOSED:
+            if self._handshake_completed:
                 attempt = 0
             else:
                 attempt += 1
@@ -119,6 +126,10 @@ class ConnectionManager:
     # ----- one session -----------------------------------------------------
 
     async def _run_once(self) -> StopReason:
+        # Reset per-session state. The handshake flag is set back to True
+        # inside _session() only after a valid handshake_ack.
+        self._handshake_completed = False
+
         # Drain any stale frames (including a leftover _POISON from the
         # previous session) before starting a fresh writer.
         while True:
@@ -178,6 +189,7 @@ class ConnectionManager:
             display_name=ack.display_name,
             notices=ack.notices,
         )
+        self._handshake_completed = True
         if self._on_ack is not None:
             self._on_ack(ack)
         self._status("connected")
@@ -224,7 +236,7 @@ class ConnectionManager:
                     break
 
                 now = asyncio.get_running_loop().time()
-                if now - last_pong > self._ping_interval + self._pong_timeout * 2 + 20:
+                if now - last_pong > self._heartbeat_deadline:
                     log.warning("ws.heartbeat_lost", since=now - last_pong)
                     stop_reason = StopReason.HEARTBEAT_LOST
                     break
