@@ -11,19 +11,24 @@ from the operator via the YAML layer in `vllm_models_config.py`.
 """
 from __future__ import annotations
 
+import json
 from typing import Any, AsyncIterator
 
 import httpx
 
+from ._reasoning import ThinkTagSplitter
 from .engine import (
     EngineBadResponse,
     EngineStreamItem,
     EngineUnavailable,
+    StreamTerminal,
 )
 from .frames import (
     GenerateChatBody,
     ModelCapability,
     ModelDescriptor,
+    StreamDelta,
+    Usage,
 )
 from .logging_setup import get_logger
 from .vllm_models_config import VllmModelMetadata
@@ -135,7 +140,163 @@ class VllmEngine:
             engine_metadata=engine_metadata,
         )
 
-    def generate_chat(
+    async def generate_chat(
         self, body: GenerateChatBody
     ) -> AsyncIterator[EngineStreamItem]:
-        raise NotImplementedError  # Tasks 8-12
+        payload = self._build_chat_payload(body)
+        reasoning_on = body.options.reasoning
+
+        try:
+            async with self._client.stream(
+                "POST",
+                "/v1/chat/completions",
+                json=payload,
+                timeout=httpx.Timeout(None, connect=3.0),
+            ) as resp:
+                if resp.status_code >= 400:
+                    text = (await resp.aread()).decode("utf-8", errors="replace")
+                    raise EngineBadResponse(f"vllm {resp.status_code}: {text}")
+
+                splitter = ThinkTagSplitter(reasoning_on=reasoning_on)
+                terminal: StreamTerminal | None = None
+
+                async for raw_line in resp.aiter_lines():
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[len("data:"):].strip()
+                    if data == "[DONE]":
+                        continue
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        raise EngineBadResponse(
+                            f"non-JSON SSE line from /v1/chat/completions: {data[:80]}"
+                        )
+
+                    # Terminal-usage-only chunk: choices=[], usage=...
+                    usage_block = chunk.get("usage")
+                    choices = chunk.get("choices") or []
+                    if not choices and usage_block:
+                        if terminal is not None:
+                            terminal = StreamTerminal(
+                                finish_reason=terminal.finish_reason,
+                                usage=_usage_from_block(usage_block),
+                            )
+                        continue
+
+                    for choice in choices:
+                        delta = choice.get("delta") or {}
+
+                        content = delta.get("content")
+                        if isinstance(content, str) and content:
+                            for d in splitter.feed(content):
+                                yield d
+
+                        finish_reason = choice.get("finish_reason")
+                        if finish_reason is not None:
+                            terminal = StreamTerminal(
+                                finish_reason=_map_finish_reason(finish_reason),
+                                usage=(
+                                    _usage_from_block(usage_block)
+                                    if usage_block else None
+                                ),
+                            )
+
+                if terminal is None:
+                    terminal = StreamTerminal(finish_reason="stop")
+                yield terminal
+
+        except httpx.ConnectError as e:
+            raise EngineUnavailable(str(e)) from e
+        except httpx.HTTPError as e:
+            raise EngineUnavailable(str(e)) from e
+
+    def _build_chat_payload(self, body: GenerateChatBody) -> dict[str, Any]:
+        messages = [_message_to_openai(m) for m in body.messages]
+        payload: dict[str, Any] = {
+            "model": body.model_slug,
+            "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        p = body.parameters
+        if p.temperature is not None:
+            payload["temperature"] = p.temperature
+        if p.top_p is not None:
+            payload["top_p"] = p.top_p
+        if p.max_tokens is not None:
+            payload["max_tokens"] = p.max_tokens
+        if p.stop is not None:
+            payload["stop"] = p.stop
+        if body.tools is not None:
+            payload["tools"] = [t.model_dump(exclude_none=True) for t in body.tools]
+        return payload
+
+
+_FINISH_REASON_MAP = {
+    "stop": "stop",
+    "length": "length",
+    "tool_calls": "tool_calls",
+}
+
+
+def _map_finish_reason(raw: str) -> str:
+    return _FINISH_REASON_MAP.get(raw, "stop")
+
+
+def _usage_from_block(block: dict[str, Any]) -> Usage | None:
+    prompt = block.get("prompt_tokens")
+    completion = block.get("completion_tokens")
+    if isinstance(prompt, int) and isinstance(completion, int):
+        return Usage(
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            total_tokens=prompt + completion,
+        )
+    return None
+
+
+def _message_to_openai(m: Any) -> dict[str, Any]:
+    """Map a CSP Message to the OpenAI chat-completions schema.
+
+    Text-only content passes through as a string. Multimodal (list) content
+    becomes an array of parts with `image_url` data-URI encoding for images.
+    Tool calls and tool_call_id pass through unchanged — vLLM is
+    OpenAI-native there.
+    """
+    out: dict[str, Any] = {"role": m.role}
+    content = m.content
+    if isinstance(content, list):
+        parts: list[dict[str, Any]] = []
+        for part in content:
+            if part.type == "text":
+                parts.append({"type": "text", "text": part.text})
+            elif part.type == "image":
+                parts.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{part.media_type};base64,{part.data_b64}",
+                    },
+                })
+        out["content"] = parts
+    else:
+        out["content"] = content or ""
+
+    if m.tool_calls:
+        out["tool_calls"] = [
+            {
+                "id": tc.id,
+                "type": tc.type,
+                "function": {
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments or "",
+                },
+            }
+            for tc in m.tool_calls
+        ]
+    if m.tool_call_id is not None:
+        out["tool_call_id"] = m.tool_call_id
+    return out
