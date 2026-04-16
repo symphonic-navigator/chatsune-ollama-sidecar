@@ -178,3 +178,118 @@ async def test_request_payload_has_stream_true_and_include_usage():
     assert sent["max_tokens"] == 128
     assert sent["top_p"] == 0.9
     assert sent["stop"] == ["\n"]
+
+
+@respx.mock
+async def test_reasoning_content_emitted_when_reasoning_on():
+    events = [
+        _chunk(reasoning_content="Let me "),
+        _chunk(reasoning_content="think..."),
+        _chunk(content="The answer is 42."),
+        _chunk(finish_reason="stop"),
+    ]
+    respx.post("http://localhost:8000/v1/chat/completions").mock(
+        return_value=httpx.Response(200, content=_sse(events))
+    )
+    engine = VllmEngine("http://localhost:8000", metadata={})
+    body = GenerateChatBody(
+        model_slug="m",
+        messages=[Message(role="user", content="q")],
+        options={"reasoning": True},
+    )
+    deltas: list[StreamDelta] = []
+    try:
+        async for item in engine.generate_chat(body):
+            if isinstance(item, StreamDelta):
+                deltas.append(item)
+    finally:
+        await engine.aclose()
+    reasoning = "".join(d.reasoning or "" for d in deltas)
+    content = "".join(d.content or "" for d in deltas)
+    assert reasoning == "Let me think..."
+    assert content == "The answer is 42."
+    for d in deltas:
+        populated = sum(x is not None for x in (d.content, d.reasoning, d.tool_calls))
+        assert populated <= 1
+
+
+@respx.mock
+async def test_reasoning_content_suppressed_when_reasoning_off():
+    events = [
+        _chunk(reasoning_content="secret"),
+        _chunk(content="visible"),
+        _chunk(finish_reason="stop"),
+    ]
+    respx.post("http://localhost:8000/v1/chat/completions").mock(
+        return_value=httpx.Response(200, content=_sse(events))
+    )
+    engine = VllmEngine("http://localhost:8000", metadata={})
+    body = GenerateChatBody(
+        model_slug="m",
+        messages=[Message(role="user", content="q")],
+    )
+    deltas: list[StreamDelta] = []
+    try:
+        async for item in engine.generate_chat(body):
+            if isinstance(item, StreamDelta):
+                deltas.append(item)
+    finally:
+        await engine.aclose()
+    assert "".join(d.reasoning or "" for d in deltas) == ""
+    assert "".join(d.content or "" for d in deltas) == "visible"
+
+
+@respx.mock
+async def test_inline_think_tags_split_when_reasoning_on():
+    events = [
+        _chunk(content="<think>"),
+        _chunk(content="pondering"),
+        _chunk(content="</think>"),
+        _chunk(content="answer is 42"),
+        _chunk(finish_reason="stop"),
+    ]
+    respx.post("http://localhost:8000/v1/chat/completions").mock(
+        return_value=httpx.Response(200, content=_sse(events))
+    )
+    engine = VllmEngine("http://localhost:8000", metadata={})
+    body = GenerateChatBody(
+        model_slug="m",
+        messages=[Message(role="user", content="q")],
+        options={"reasoning": True},
+    )
+    deltas: list[StreamDelta] = []
+    try:
+        async for item in engine.generate_chat(body):
+            if isinstance(item, StreamDelta):
+                deltas.append(item)
+    finally:
+        await engine.aclose()
+    reasoning = "".join(d.reasoning or "" for d in deltas)
+    content = "".join(d.content or "" for d in deltas)
+    assert reasoning == "pondering"
+    assert content == "answer is 42"
+
+
+@respx.mock
+async def test_inline_think_tags_dropped_when_reasoning_off():
+    events = [
+        _chunk(content="<think>secret</think>visible"),
+        _chunk(finish_reason="stop"),
+    ]
+    respx.post("http://localhost:8000/v1/chat/completions").mock(
+        return_value=httpx.Response(200, content=_sse(events))
+    )
+    engine = VllmEngine("http://localhost:8000", metadata={})
+    body = GenerateChatBody(
+        model_slug="m",
+        messages=[Message(role="user", content="q")],
+    )
+    deltas: list[StreamDelta] = []
+    try:
+        async for item in engine.generate_chat(body):
+            if isinstance(item, StreamDelta):
+                deltas.append(item)
+    finally:
+        await engine.aclose()
+    assert "".join(d.reasoning or "" for d in deltas) == ""
+    assert "".join(d.content or "" for d in deltas) == "visible"

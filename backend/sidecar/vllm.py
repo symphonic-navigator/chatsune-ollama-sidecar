@@ -195,6 +195,14 @@ class VllmEngine:
                             for d in splitter.feed(content):
                                 yield d
 
+                        reasoning_content = delta.get("reasoning_content")
+                        if (
+                            isinstance(reasoning_content, str)
+                            and reasoning_content
+                            and reasoning_on
+                        ):
+                            yield StreamDelta(reasoning=reasoning_content)
+
                         finish_reason = choice.get("finish_reason")
                         if finish_reason is not None:
                             terminal = StreamTerminal(
