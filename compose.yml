@@ -5,7 +5,12 @@ services:
     environment:
       CHATSUNE_BACKEND_URL: ${CHATSUNE_BACKEND_URL:?required}
       CHATSUNE_HOST_KEY: ${CHATSUNE_HOST_KEY:?required}
+      SIDECAR_ENGINE: ${SIDECAR_ENGINE:-ollama}
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      VLLM_URL: ${VLLM_URL:-http://host.docker.internal:8000}
+      # Optional — only relevant for SIDECAR_ENGINE=vllm:
+      # VLLM_MODELS_CONFIG_PATH: /etc/chatsune-sidecar/models.yaml
+      # VLLM_MODELS_OVERLAY_PATH: /etc/chatsune-sidecar/models.local.yaml
       SIDECAR_HEALTH_PORT: "8080"
       SIDECAR_LOG_LEVEL: ${SIDECAR_LOG_LEVEL:-info}
     extra_hosts:
@@ -14,6 +19,10 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    # Cookbook: mount YAML metadata files when using vLLM.
+    # volumes:
+    #   - ./vllm-models.yaml:/etc/chatsune-sidecar/models.yaml:ro
+    #   - ./vllm-models.local.yaml:/etc/chatsune-sidecar/models.local.yaml:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz').read()"]
       interval: 30s
