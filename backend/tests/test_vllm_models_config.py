@@ -130,7 +130,7 @@ def test_missing_file_raises(tmp_path: Path):
 
 def test_invalid_yaml_raises(tmp_path: Path):
     bad = _write(tmp_path / "bad.yaml", "models: [this: isn't: valid")
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(ValueError) as exc_info:
         load_vllm_models_config(bad, None)
     assert "bad.yaml" in str(exc_info.value)
 
@@ -140,7 +140,7 @@ def test_schema_violation_unknown_capability(tmp_path: Path):
         tmp_path / "bad.yaml",
         "models:\n  m1:\n    capabilities: [videooo]\n",
     )
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(ValueError) as exc_info:
         load_vllm_models_config(bad, None)
     assert "bad.yaml" in str(exc_info.value)
 
@@ -150,7 +150,7 @@ def test_schema_violation_capabilities_not_a_list(tmp_path: Path):
         tmp_path / "bad.yaml",
         "models:\n  m1:\n    capabilities: vision\n",
     )
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(ValueError) as exc_info:
         load_vllm_models_config(bad, None)
     assert "bad.yaml" in str(exc_info.value)
 
@@ -166,3 +166,54 @@ def test_metadata_model_defaults():
     assert m.parameter_count is None
     assert m.quantisation is None
     assert m.capabilities is None
+
+
+def test_overlay_null_does_not_clear_base(tmp_path: Path):
+    """An explicit `null` in the overlay is treated as 'do not override'.
+
+    To actually clear a list, the operator writes `[]`. This is
+    documented in the loader's docstring.
+    """
+    base = _write(
+        tmp_path / "base.yaml",
+        """
+models:
+  m1:
+    display_name: Base Name
+    capabilities: [text, vision]
+""",
+    )
+    overlay = _write(
+        tmp_path / "overlay.yaml",
+        """
+models:
+  m1:
+    capabilities: null
+""",
+    )
+    result = load_vllm_models_config(base, overlay)
+    # Null in overlay means "no override" — base capabilities survive.
+    assert result["m1"].capabilities == ["text", "vision"]
+    assert result["m1"].display_name == "Base Name"
+
+
+def test_overlay_empty_list_clears_capabilities(tmp_path: Path):
+    """The explicit way to clear a list is `[]`, not `null`."""
+    base = _write(
+        tmp_path / "base.yaml",
+        """
+models:
+  m1:
+    capabilities: [text, vision, tool_calling]
+""",
+    )
+    overlay = _write(
+        tmp_path / "overlay.yaml",
+        """
+models:
+  m1:
+    capabilities: []
+""",
+    )
+    result = load_vllm_models_config(base, overlay)
+    assert result["m1"].capabilities == []

@@ -50,6 +50,12 @@ def load_vllm_models_config(
     fields from the base at per-field granularity; lists are replaced
     wholesale (no union, no subtraction).
 
+    Null-semantics note: A field explicitly set to `null` in the overlay
+    is treated as "do not override" — the base value survives. To clear a
+    list, write an empty sequence (`capabilities: []`). This keeps the
+    merge predictable when YAML files are hand-edited and a blank value
+    might otherwise be mistaken for "remove".
+
     Raises on:
       - a configured path whose file does not exist;
       - malformed YAML;
