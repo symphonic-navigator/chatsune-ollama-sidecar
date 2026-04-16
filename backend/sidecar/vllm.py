@@ -11,13 +11,25 @@ from the operator via the YAML layer in `vllm_models_config.py`.
 """
 from __future__ import annotations
 
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 import httpx
 
-from .engine import EngineStreamItem
-from .frames import GenerateChatBody, ModelDescriptor
+from .engine import (
+    EngineBadResponse,
+    EngineStreamItem,
+    EngineUnavailable,
+)
+from .frames import (
+    GenerateChatBody,
+    ModelCapability,
+    ModelDescriptor,
+)
+from .logging_setup import get_logger
 from .vllm_models_config import VllmModelMetadata
+
+
+log = get_logger("vllm")
 
 
 class VllmEngine:
@@ -51,7 +63,77 @@ class VllmEngine:
             return "unknown"
 
     async def list_models(self) -> list[ModelDescriptor]:
-        raise NotImplementedError  # Task 7
+        try:
+            r = await self._client.get("/v1/models")
+            r.raise_for_status()
+            payload: dict[str, Any] = r.json()
+        except httpx.ConnectError as e:
+            raise EngineUnavailable(str(e)) from e
+        except httpx.HTTPError as e:
+            raise EngineBadResponse(str(e)) from e
+        except ValueError as e:
+            raise EngineBadResponse(f"non-JSON /v1/models body: {e}") from e
+
+        out: list[ModelDescriptor] = []
+        for raw in payload.get("data") or []:
+            descriptor = self._describe_one(raw)
+            if descriptor is not None:
+                out.append(descriptor)
+        return out
+
+    def _describe_one(self, raw: dict[str, Any]) -> ModelDescriptor | None:
+        served_id = raw.get("id")
+        if not isinstance(served_id, str) or not served_id:
+            return None
+
+        context_length = raw.get("max_model_len")
+        if not isinstance(context_length, int):
+            log.warning(
+                "vllm.model_dropped_no_context",
+                id=served_id,
+                reason="max_model_len missing or not an integer",
+            )
+            return None
+
+        meta = self._metadata.get(served_id)
+        if meta is None:
+            if served_id not in self._warned_unknown:
+                log.warning(
+                    "vllm.model_without_metadata",
+                    id=served_id,
+                    message=(
+                        f"No YAML metadata for model '{served_id}'. "
+                        "Listing with capabilities=['text'] only."
+                    ),
+                )
+                self._warned_unknown.add(served_id)
+            capabilities: list[ModelCapability] = ["text"]
+            display_name = served_id
+            parameter_count: int | None = None
+            quantisation: str | None = None
+        else:
+            capabilities = list(meta.capabilities) if meta.capabilities else ["text"]
+            display_name = meta.display_name or served_id
+            parameter_count = meta.parameter_count
+            quantisation = meta.quantisation
+
+        engine_metadata: dict[str, Any] = {}
+        for key in ("owned_by", "root"):
+            value = raw.get(key)
+            if value is not None:
+                engine_metadata[key] = value
+
+        return ModelDescriptor(
+            slug=served_id,
+            display_name=display_name,
+            parameter_count=parameter_count,
+            context_length=context_length,
+            quantisation=quantisation,
+            capabilities=capabilities,
+            engine_family="vllm",
+            engine_model_id=served_id,
+            engine_metadata=engine_metadata,
+        )
 
     def generate_chat(
         self, body: GenerateChatBody
