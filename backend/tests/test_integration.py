@@ -13,7 +13,6 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 import httpx
-import httpx._content
 import pytest
 import respx
 import websockets
@@ -67,9 +66,20 @@ async def _async_ndjson_stream(lines) -> AsyncIterator[bytes]:
         await asyncio.sleep(0)
 
 
+class _NdjsonStream(httpx.AsyncByteStream):
+    def __init__(self, lines):
+        self._lines = lines
+
+    async def __aiter__(self):
+        async for chunk in _async_ndjson_stream(self._lines):
+            yield chunk
+
+    async def aclose(self) -> None:
+        pass
+
+
 def _streaming_chat_response(lines) -> httpx.Response:
-    stream = httpx._content.AsyncIteratorByteStream(_async_ndjson_stream(lines))
-    return httpx.Response(200, stream=stream)
+    return httpx.Response(200, stream=_NdjsonStream(lines))
 
 
 @respx.mock
