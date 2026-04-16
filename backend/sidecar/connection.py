@@ -119,6 +119,14 @@ class ConnectionManager:
     # ----- one session -----------------------------------------------------
 
     async def _run_once(self) -> StopReason:
+        # Drain any stale frames (including a leftover _POISON from the
+        # previous session) before starting a fresh writer.
+        while True:
+            try:
+                self._send_q.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
         headers = {"Authorization": f"Bearer {self._settings.chatsune_host_key}"}
         try:
             async with connect(
@@ -149,7 +157,7 @@ class ConnectionManager:
 
         try:
             ack = parse_frame(json.loads(raw))
-        except (json.JSONDecodeError, Exception):
+        except Exception:
             log.error("ws.bad_handshake_ack", raw=str(raw)[:200])
             return StopReason.CONNECT_FAILED
 
@@ -231,7 +239,7 @@ class ConnectionManager:
 
                 try:
                     frame = parse_frame(json.loads(msg))
-                except (json.JSONDecodeError, Exception) as e:
+                except Exception as e:
                     log.error("ws.bad_frame", error=str(e))
                     continue
                 if frame is None:
