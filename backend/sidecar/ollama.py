@@ -6,10 +6,18 @@ streaming chat (`/api/chat`).
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 from typing import Any, AsyncIterator
 
 import httpx
+
+_log = logging.getLogger(__name__)
+
+# Opt-in payload tracing for cache-miss debugging. Enable via
+# LLM_TRACE_PAYLOADS=1; shows the final /api/chat payload to Ollama.
+_TRACE_PAYLOADS = os.environ.get("LLM_TRACE_PAYLOADS") == "1"
 
 from .engine import (
     EngineBadResponse,
@@ -146,6 +154,11 @@ class OllamaEngine:
         self, body: GenerateChatBody
     ) -> AsyncIterator[EngineStreamItem]:
         payload = self._build_chat_payload(body)
+        if _TRACE_PAYLOADS:
+            _log.info(
+                "LLM_TRACE path=sidecar-ollama payload=%s",
+                json.dumps(payload, default=str, sort_keys=True),
+            )
         reasoning_on = body.options.reasoning
 
         try:
