@@ -3,6 +3,7 @@
 Handles discovery (`/api/tags` + `/api/show`) and — in later tasks —
 streaming chat (`/api/chat`).
 """
+
 from __future__ import annotations
 
 import json
@@ -231,11 +232,11 @@ class OllamaEngine:
             "stream": True,
         }
         # Ollama's top-level `think` flag enables the dedicated thinking
-        # channel on capable models. Only set it when truly requested so
-        # older Ollama versions (which don't recognise the parameter)
-        # don't see a no-op key.
-        if body.options.reasoning:
-            payload["think"] = True
+        # channel on capable models. Set it explicitly on every request:
+        # omitting it causes Ollama to enable reasoning by default on
+        # capable models, which wastes prompt processing on thinking
+        # tokens we then discard (reasoning_on=False path below).
+        payload["think"] = body.options.reasoning
         if options:
             payload["options"] = options
         if body.tools is not None:
@@ -291,6 +292,7 @@ def _display_name(slug: str) -> str:
 # ---------------------------------------------------------------------------
 # Chat translation helpers
 # ---------------------------------------------------------------------------
+
 
 def _message_to_ollama(m: Any) -> dict[str, Any]:
     """Map our Message to the Ollama /api/chat schema."""
@@ -371,7 +373,7 @@ def _tool_call_fragments(raw: Any) -> list[ToolCallFragment]:
     for i, tc in enumerate(raw):
         if not isinstance(tc, dict):
             continue
-        fn = (tc.get("function") or {})
+        fn = tc.get("function") or {}
         # Ollama emits arguments as a dict; SPEC §8.2 requires a JSON string
         # on the wire so fragments can be concatenated by consumers.
         args = fn.get("arguments")
@@ -391,4 +393,3 @@ def _tool_call_fragments(raw: Any) -> list[ToolCallFragment]:
             )
         )
     return out
-
